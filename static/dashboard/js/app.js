@@ -1,4 +1,4 @@
-let baseUrl = window.location.origin;
+let baseUrl = "/wuzapi";
 let scanned = false;
 let updateAdminTimeout = null;
 let updateUserTimeout = null;

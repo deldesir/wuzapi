@@ -147,6 +147,9 @@ func (s *server) authalice(next http.Handler) http.Handler {
 		// Get token from headers or uri parameters
 		token := r.Header.Get("token")
 		if token == "" {
+			token = r.Header.Get("Authorization")
+		}
+		if token == "" {
 			token = strings.Join(r.URL.Query()["token"], "")
 		}
 
