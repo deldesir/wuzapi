@@ -374,9 +374,15 @@ Response:
 Disconnects from Whatsapp servers, keeping the session active. This means that if you /session/connect again, it will
 reuse the session and won't require a QR code rescan.
 
+Event subscriptions are **preserved by default**. Pass `clear=true` to also reset them on disconnect.
+
 Endpoint: _/session/disconnect_
 
 Method: **POST**
+
+Query parameters:
+
+* `clear` (optional, boolean): if `true`, clears the user's event subscriptions on disconnect. Defaults to `false` (subscriptions preserved).
 
 
 ```
@@ -637,6 +643,76 @@ Response:
 
 ---
 
+## Get Privacy Settings
+
+Returns the account's current privacy settings.
+
+Endpoint: _/user/privacy_
+
+Method: **GET**
+
+```
+curl -s -X GET -H 'Token: 1234ABCD' http://localhost:8080/user/privacy
+```
+
+Response:
+
+```json
+{
+  "code": 200,
+  "data": {
+    "GroupAdd": "contacts",
+    "LastSeen": "all",
+    "Status": "contacts",
+    "Profile": "all",
+    "ReadReceipts": "all",
+    "CallAdd": "all",
+    "Online": "all",
+    "Messages": "all",
+    "Defense": "off",
+    "Stickers": "contacts"
+  },
+  "success": true
+}
+```
+
+---
+
+## Set Privacy Setting
+
+Updates a single privacy setting.
+
+Endpoint: _/user/privacy_
+
+Method: **POST**
+
+Valid `Name` / `Value` combinations:
+
+| Name | Valid values |
+|------|--------------|
+| `groupadd`, `last`, `status`, `profile` | `all`, `contacts`, `contact_blacklist`, `none` |
+| `readreceipts` | `all`, `none` |
+| `online` | `all`, `match_last_seen` |
+| `calladd` | `all`, `known` |
+
+```
+curl -s -X POST -H 'Token: 1234ABCD' -H 'Content-Type: application/json' --data '{"Name":"last","Value":"contacts"}' http://localhost:8080/user/privacy
+```
+
+Response:
+
+```json
+{
+  "code": 200,
+  "data": {
+    "LastSeen": "contacts"
+  },
+  "success": true
+}
+```
+
+---
+
 ## Block User
 
 Blocks a WhatsApp user and returns the updated blocklist.
@@ -690,6 +766,35 @@ Response:
     "JID": "5491155554445@s.whatsapp.net",
     "Blocklist": [],
     "DHash": "1234567891"
+  },
+  "success": true
+}
+```
+
+---
+
+## Get Blocklist
+
+Returns the list of WhatsApp users currently blocked by the session.
+
+Endpoint: _/user/blocklist_
+
+Method: **GET**
+
+```
+curl -s -X GET -H 'Token: 1234ABCD' http://localhost:8080/user/blocklist
+```
+
+Response:
+
+```json
+{
+  "code": 200,
+  "data": {
+    "Blocklist": [
+      "5491155554445@s.whatsapp.net"
+    ],
+    "DHash": "1234567890"
   },
   "success": true
 }
