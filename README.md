@@ -75,6 +75,7 @@ you can use to alter behaviour
 * -logtype : format for logs, either console (default) or json
 * -color : enable colored output for console logs
 * -osname : Connection OS Name in Whatsapp
+* -autopresence : automatic presence after connecting, either available (default) or unavailable
 * -skipmedia : Skip downloading media from messages
 * -wadebug : enable whatsmeow debug, either INFO or DEBUG levels are suported
 
@@ -127,13 +128,41 @@ WUZAPI_GLOBAL_HMAC_KEY=your_global_hmac_key_here
 TZ=America/New_York
 WEBHOOK_FORMAT=json
 SESSION_DEVICE_NAME=WuzAPI
+WUZAPI_AUTO_PRESENCE=available
 WUZAPI_PORT=8080
 WUZAPI_GLOBAL_WEBHOOK=https://your-global-webhook.url
 WEBHOOK_RETRY_ENABLED=true
 WEBHOOK_RETRY_COUNT=2
 WEBHOOK_RETRY_DELAY_SECONDS=30
 WEBHOOK_ERROR_QUEUE_NAME=wuzapi_dead_letter_webhooks
+WUZAPI_MEDIA_CONCURRENCY=2
+# WUZAPI_MEDIA_TMPDIR=/path/to/disk-backed/temp
 ```
+
+### Attachment temporary storage
+
+Incoming event attachments and outgoing document, audio, image, video, sticker,
+and optional button-image uploads use private temporary files automatically.
+`WUZAPI_MEDIA_TMPDIR` defaults to the operating system temporary directory.
+`WUZAPI_MEDIA_CONCURRENCY` defaults to `2` and limits simultaneous media downloads,
+uploads, decoding, conversions, and delivery-body preparation. Waiting operations
+honor cancellation; webhook retry backoff does not hold a media slot.
+
+Use a **disk-backed** writable directory or container volume for memory savings.
+A tmpfs mount still consumes RAM. Set the path inside the container and mount the
+backing storage there; setting a host path in `.env` alone does not mount it.
+The directory must support file locks. Allow space for plaintext, encryption or
+conversion scratch files, and base64 delivery bodies (approximately 4/3 of the
+attachment size each). Slow receivers and pending retries retain delivery files.
+
+Files are removed when their consumers finish. Each process owns a locked private
+directory; later starts reclaim abandoned directories without touching another
+running instance. Temporary files are not a durable queue and do not recover
+in-flight messages after a crash. Existing API inputs, delivery formats, and URL
+size limits are unchanged. JSON request decoding, image pixel decoding, and
+RabbitMQ's final payload buffer still have size-dependent memory costs.
+
+See [attachment memory validation](media-memory.md) for measurements and test limits.
 
 ### Important Notes
 
@@ -169,7 +198,13 @@ WEBHOOK_FORMAT=json # or "form" for the default
 SESSION_DEVICE_NAME=WuzAPI
 WUZAPI_PORT=8080 # Port for the WuzAPI server
 WUZAPI_GLOBAL_WEBHOOK= # Global webhook URL for all instances
+WUZAPI_AUTO_PRESENCE=available # use unavailable to preserve primary-phone push notifications
 ```
+
+`WUZAPI_AUTO_PRESENCE` controls the presence announced after a session connects or
+its push name changes. The default `available` value preserves the existing behavior
+and enables contact presence updates. Set it to `unavailable` to keep the linked
+client offline so WhatsApp continues sending push notifications to the primary phone.
 
 ### RabbitMQ Integration
 WuzAPI supports sending WhatsApp events to a RabbitMQ queue for global event distribution. When enabled, all WhatsApp events will be published to the specified queue regardless of individual user webhook configurations.
@@ -362,15 +397,15 @@ go build .
   </td>
 </tr><tr>
 <td align="center">
-    <a href="https://github.com/ramon-victor">
-      <img src="https://avatars.githubusercontent.com/u/13617054?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>ramon-victor</b></sub>
+    <a href="https://github.com/ThiagoBauken">
+      <img src="https://avatars.githubusercontent.com/u/107090829?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>ThiagoBauken</b></sub>
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/vitorsilvalima">
-      <img src="https://avatars.githubusercontent.com/u/9752658?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>vitorsilvalima</b></sub>
+    <a href="https://github.com/ramon-victor">
+      <img src="https://avatars.githubusercontent.com/u/13617054?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>ramon-victor</b></sub>
     </a>
   </td>
 <td align="center">
@@ -380,15 +415,15 @@ go build .
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/Piahn">
-      <img src="https://avatars.githubusercontent.com/u/132025108?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>Piahn</b></sub>
+    <a href="https://github.com/vitorsilvalima">
+      <img src="https://avatars.githubusercontent.com/u/9752658?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>vitorsilvalima</b></sub>
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/ThiagoBauken">
-      <img src="https://avatars.githubusercontent.com/u/107090829?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>ThiagoBauken</b></sub>
+    <a href="https://github.com/Piahn">
+      <img src="https://avatars.githubusercontent.com/u/132025108?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>Piahn</b></sub>
     </a>
   </td>
 <td align="center">
@@ -429,16 +464,28 @@ go build .
     </a>
   </td>
 <td align="center">
+    <a href="https://github.com/Alg0rix">
+      <img src="https://avatars.githubusercontent.com/u/53804949?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>Alg0rix</b></sub>
+    </a>
+  </td>
+</tr><tr>
+<td align="center">
     <a href="https://github.com/igortrinidad">
       <img src="https://avatars.githubusercontent.com/u/13478652?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>igortrinidad</b></sub>
     </a>
   </td>
-</tr><tr>
 <td align="center">
     <a href="https://github.com/chrsmendes">
       <img src="https://avatars.githubusercontent.com/u/77082167?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>chrsmendes</b></sub>
+    </a>
+  </td>
+<td align="center">
+    <a href="https://github.com/claytim">
+      <img src="https://avatars.githubusercontent.com/u/47343472?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>claytim</b></sub>
     </a>
   </td>
 <td align="center">
@@ -448,11 +495,18 @@ go build .
     </a>
   </td>
 <td align="center">
+    <a href="https://github.com/My-con">
+      <img src="https://avatars.githubusercontent.com/u/123265027?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>My-con</b></sub>
+    </a>
+  </td>
+<td align="center">
     <a href="https://github.com/paul-lestyo">
       <img src="https://avatars.githubusercontent.com/u/51690314?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>paul-lestyo</b></sub>
     </a>
   </td>
+</tr><tr>
 <td align="center">
     <a href="https://github.com/luiis716">
       <img src="https://avatars.githubusercontent.com/u/97978347?v=4" width="100px;" style="border-radius:50%;"/><br />
@@ -471,7 +525,6 @@ go build .
       <sub><b>joaosouz4dev</b></sub>
     </a>
   </td>
-</tr><tr>
 <td align="center">
     <a href="https://github.com/gusnips">
       <img src="https://avatars.githubusercontent.com/u/981265?v=4" width="100px;" style="border-radius:50%;"/><br />
@@ -479,27 +532,9 @@ go build .
     </a>
   </td>
 <td align="center">
-    <a href="https://github.com/anilgulecha">
-      <img src="https://avatars.githubusercontent.com/u/1016984?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>anilgulecha</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/zennnez">
-      <img src="https://avatars.githubusercontent.com/u/3524740?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>zennnez</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/murilo-koko">
-      <img src="https://avatars.githubusercontent.com/u/223512888?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>murilo-koko</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/Jwenqiang">
-      <img src="https://avatars.githubusercontent.com/u/20280001?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>Jwenqiang</b></sub>
+    <a href="https://github.com/Flow-Mind-Company">
+      <img src="https://avatars.githubusercontent.com/u/228500487?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>Flow-Mind-Company</b></sub>
     </a>
   </td>
 </tr></table>
