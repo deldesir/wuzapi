@@ -164,6 +164,20 @@ RabbitMQ's final payload buffer still have size-dependent memory costs.
 
 See [attachment memory validation](media-memory.md) for measurements and test limits.
 
+### Log verbosity
+
+Set `LOG_LEVEL=warn` in `.env` or the process environment to show warnings and
+more severe WuzAPI logs. Accepted values are `trace`, `debug`, `info`, `warn`,
+`error`, `fatal`, and `panic`, ignoring case and surrounding whitespace. An unset,
+empty, or invalid value preserves the existing verbosity; numeric values and
+`disabled` are not accepted. Existing process environment values take precedence
+over `.env`, including an explicitly empty value.
+
+The filter is applied before startup messages and works with console and JSON
+output. It controls WuzAPI's zerolog logger, not Whatsmeow's `-wadebug` output.
+Compose and Swarm forward `LOG_LEVEL`; for Swarm, export it before deploying since
+`docker stack deploy` does not automatically read `.env` for substitution.
+
 ### Important Notes
 
 #### Auto-Generated Credentials
@@ -489,6 +503,12 @@ go build .
     </a>
   </td>
 <td align="center">
+    <a href="https://github.com/eliasmeireles">
+      <img src="https://avatars.githubusercontent.com/u/13203692?v=4" width="100px;" style="border-radius:50%;"/><br />
+      <sub><b>eliasmeireles</b></sub>
+    </a>
+  </td>
+<td align="center">
     <a href="https://github.com/jeffersonfelixdev">
       <img src="https://avatars.githubusercontent.com/u/3003222?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>jeffersonfelixdev</b></sub>
@@ -500,13 +520,13 @@ go build .
       <sub><b>My-con</b></sub>
     </a>
   </td>
+</tr><tr>
 <td align="center">
     <a href="https://github.com/paul-lestyo">
       <img src="https://avatars.githubusercontent.com/u/51690314?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>paul-lestyo</b></sub>
     </a>
   </td>
-</tr><tr>
 <td align="center">
     <a href="https://github.com/luiis716">
       <img src="https://avatars.githubusercontent.com/u/97978347?v=4" width="100px;" style="border-radius:50%;"/><br />
@@ -529,12 +549,6 @@ go build .
     <a href="https://github.com/gusnips">
       <img src="https://avatars.githubusercontent.com/u/981265?v=4" width="100px;" style="border-radius:50%;"/><br />
       <sub><b>gusnips</b></sub>
-    </a>
-  </td>
-<td align="center">
-    <a href="https://github.com/Flow-Mind-Company">
-      <img src="https://avatars.githubusercontent.com/u/228500487?v=4" width="100px;" style="border-radius:50%;"/><br />
-      <sub><b>Flow-Mind-Company</b></sub>
     </a>
   </td>
 </tr></table>
@@ -573,12 +587,6 @@ account, the explicit `GET /session/history` endpoint remains available for
 message-based history requests; changing sync days alone does not backfill it.
 Both SQLite and PostgreSQL are supported, with existing accounts defaulting to 0.
 
-Regression tests run on SQLite with `go test ./...`. To run the same migration,
-API, and pairing-payload checks on PostgreSQL, set `WUZAPI_TEST_POSTGRES_DSN` to a
-test database connection string and run `go test -run TestHistorySync ./...`.
-The database role must be able to create schemas; tests create and remove their
-own schemas.
-
 ## Star History
 
 <a href="https://www.star-history.com/?type=date&repos=asternic%2Fwuzapi">
@@ -591,7 +599,7 @@ own schemas.
 
 ## License
 
-Copyright &copy; 2025 Nicolás Gudiño and contributors
+Copyright &copy; 2026 Nicolás Gudiño and contributors
 
 [MIT](https://choosealicense.com/licenses/mit/)
 
@@ -642,3 +650,17 @@ distribution makes it eligible for export under the License Exception ENC
 Technology Software Unrestricted (TSU) exception (see the BIS Export
 Administration Regulations, Section 740.13) for both object code and source
 code.
+
+### Message history edits
+
+`/chat/history` returns stored events, newest first, rather than the current state of
+each message. Both live and HistorySync edits are stored as separate `edit` rows:
+`message_id` identifies the edit, `quoted_message_id` identifies its target, and
+`text_content` contains the replacement text or caption, including an empty caption.
+The original message stays unchanged. Consumers must apply edits to their targets;
+use the protocol message's `timestampMS` in `datajson` to order successive edits when
+available, since database timestamps record insertion time, including HistorySync.
+A limited response can include an edit without the original message.
+
+Previously imported `unknown` edits are repaired when redelivered. This does not
+backfill existing history or recover events that WhatsApp does not redeliver.
