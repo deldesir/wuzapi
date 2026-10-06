@@ -23,7 +23,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
-	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog"
@@ -222,6 +221,12 @@ func isPrivateOrLoopback(ip net.IP) bool {
 }
 
 func main() {
+	// Configure logging after loading .env, before emitting startup messages.
+	err := loadEnvAndConfigureLogging()
+	if err != nil {
+		log.Warn().Err(err).Msg("It was not possible to load the .env file (it may not exist).")
+	}
+
 	for _, cidr := range []string{
 		"127.0.0.0/8",    // IPv4 loopback
 		"10.0.0.0/8",     // RFC1918
@@ -237,11 +242,6 @@ func main() {
 			log.Fatal().Err(err).Msgf("Failed to parse CIDR string: %s", cidr)
 		}
 		privateIPBlocks = append(privateIPBlocks, block)
-	}
-
-	err := godotenv.Load()
-	if err != nil {
-		log.Warn().Err(err).Msg("It was not possible to load the .env file (it may not exist).")
 	}
 
 	flag.Parse()
