@@ -320,6 +320,9 @@ func (ss *stdioServer) routeRequest(req *jsonRpcRequest) {
 	case "chat.send.buttons":
 		httpMethod = "POST"
 		httpPath = "/chat/send/buttons"
+	case "chat.send.carousel":
+		httpMethod = "POST"
+		httpPath = "/chat/send/carousel"
 	case "chat.send.list":
 		httpMethod = "POST"
 		httpPath = "/chat/send/list"
@@ -444,6 +447,9 @@ func (ss *stdioServer) routeRequest(req *jsonRpcRequest) {
 	case "group.locked":
 		httpMethod = "POST"
 		httpPath = "/group/locked"
+	case "group.memberaddmode":
+		httpMethod = "POST"
+		httpPath = "/group/memberaddmode"
 	case "group.ephemeral":
 		httpMethod = "POST"
 		httpPath = "/group/ephemeral"
