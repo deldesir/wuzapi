@@ -15,7 +15,7 @@ Be very careful—do not use this to send SPAM or anything similar. Use at your 
 ## Available endpoints
 
 * **Session:** Connect, disconnect, and log out from WhatsApp. Retrieve connection status and QR codes for scanning.
-* **Messages:** Send text, image, audio, document, template, video, sticker, location, contact, and poll messages.
+* **Messages:** Send text, image, audio, document, template, video, sticker, location, contact, poll, and image carousel messages.
 * **Users:** Check if phone numbers have WhatsApp, get user information and avatars, and retrieve the full contact list.
 * **Chat:** Set presence (typing/paused, recording media), mark messages as read, download images from messages, send reactions.
 * **Groups:** Create, delete and list groups, get info, get invite links, set participants, change group photos and names.
@@ -76,6 +76,7 @@ you can use to alter behaviour
 * -color : enable colored output for console logs
 * -osname : Connection OS Name in Whatsapp
 * -autopresence : automatic presence after connecting, either available (default) or unavailable
+* -proxypoolfallback : when every proxy pool entry is full, either block (default, refuse to connect) or direct (connect without a proxy)
 * -skipmedia : Skip downloading media from messages
 * -wadebug : enable whatsmeow debug, either INFO or DEBUG levels are suported
 
@@ -129,6 +130,7 @@ TZ=America/New_York
 WEBHOOK_FORMAT=json
 SESSION_DEVICE_NAME=WuzAPI
 WUZAPI_AUTO_PRESENCE=available
+WUZAPI_PROXY_POOL_FALLBACK=block
 WUZAPI_PORT=8080
 WUZAPI_GLOBAL_WEBHOOK=https://your-global-webhook.url
 WEBHOOK_RETRY_ENABLED=true
@@ -178,6 +180,19 @@ output. It controls WuzAPI's zerolog logger, not Whatsmeow's `-wadebug` output.
 Compose and Swarm forward `LOG_LEVEL`; for Swarm, export it before deploying since
 `docker stack deploy` does not automatically read `.env` for substitution.
 
+Per-event traffic is logged at `debug`, since it scales with the volume the
+server receives rather than with anything an operator needs to act on:
+`Message Received`, `Message delivered`, `Message was read`, `Chat Presence
+received`, `Facebook message received` and the delete/edit detections. The
+same applies to two webhook notices that describe a supported setup rather
+than a problem, and fire once per discarded event: `Skipping webhook. Not
+subscribed for this type` (the session subscribed to a subset of the events)
+and `No webhook set for user` (RabbitMQ-only or polling setups).
+
+Actions the API performs on request — `Message sent`, `Message deleted`,
+`Message pinned` and so on — stay at `info`. Use `LOG_LEVEL=debug` to bring
+the per-event traffic back.
+
 ### Important Notes
 
 #### Auto-Generated Credentials
@@ -213,12 +228,33 @@ SESSION_DEVICE_NAME=WuzAPI
 WUZAPI_PORT=8080 # Port for the WuzAPI server
 WUZAPI_GLOBAL_WEBHOOK= # Global webhook URL for all instances
 WUZAPI_AUTO_PRESENCE=available # use unavailable to preserve primary-phone push notifications
+WUZAPI_PROXY_POOL_FALLBACK=block # use direct to connect without a proxy when the proxy pool is full
 ```
 
 `WUZAPI_AUTO_PRESENCE` controls the presence announced after a session connects or
 its push name changes. The default `available` value preserves the existing behavior
 and enables contact presence updates. Set it to `unavailable` to keep the linked
 client offline so WhatsApp continues sending push notifications to the primary phone.
+
+`WUZAPI_PROXY_POOL_FALLBACK` applies when the admin [proxy pool](API.md#proxy-pool) has
+enabled proxies but all of them are at capacity. The default `block` refuses the connect
+with `503`, so a number never silently connects from the host IP. Set it to `direct` to
+connect without a proxy instead; nothing is saved, so the next connect tries the pool again.
+
+### Closed-socket recovery
+
+WuzAPI automatically attempts to reconnect a session when a message send or chat
+presence request fails with `frame socket is closed`. It waits two seconds for
+whatsmeow's normal reconnect to finish, skips recovery if already connected, and
+allows at most one recovery request per minute per session. Recovery reuses the
+existing session and proxy; it does not retry the failed message or change the
+HTTP error response. Connection attempts and failures are logged with the user ID.
+
+Set `WUZAPI_SOCKET_RECOVERY=false` or pass `-socketrecovery=false` to disable this
+fallback (enabled by default). The environment variable overrides the flag.
+Explicit disconnect, logout, and user deletion stop recovery. No background
+health polling is added; subsequent send failures can trigger another attempt
+after the cooldown if recovery fails.
 
 ### RabbitMQ Integration
 WuzAPI supports sending WhatsApp events to a RabbitMQ queue for global event distribution. When enabled, all WhatsApp events will be published to the specified queue regardless of individual user webhook configurations.
@@ -576,8 +612,10 @@ restores WhatsApp's default sync behavior. Values from 0 through 365 are accepte
 Admin user responses and `GET /session/status` expose the saved value.
 
 Sync days and `history` are separate settings: `history` is the local per-chat
-message retention count, not a number of days. The requested window is sent in
-that user's pairing payload; WhatsApp and the phone determine which messages are
+message retention count, not a number of days. A value of 0 disables local
+persistence for live, outgoing, and HistorySync messages without suppressing
+HistorySync webhooks. Positive limits apply to each chat across those sources.
+The requested window is sent in that user's pairing payload; WhatsApp and the phone determine which messages are
 available. Incoming batches use the existing `HistorySync` processing and webhooks.
 Zero sync days does not suppress WhatsApp's normal history events.
 
