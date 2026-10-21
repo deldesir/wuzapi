@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/mux"
 	"github.com/nfnt/resize"
@@ -148,7 +149,7 @@ func (s *server) authalice(next http.Handler) http.Handler {
 		events := ""
 		proxy_url := ""
 		qrcode := ""
-		var hasHmac bool // ← Nova variável para status HMAC
+		var hasHmac bool
 
 		// Get token from headers or uri parameters
 		token := r.Header.Get("token")
@@ -713,6 +714,9 @@ func (s *server) Logout() http.HandlerFunc {
 					return
 				} else {
 					log.Info().Str("jid", jid).Msg("Logged out")
+					if err := s.setDisconnectedState(txtid, false); err != nil {
+						log.Error().Err(err).Str("user_id", txtid).Msg("Failed to persist logout state")
+					}
 					clientManager.DeleteWhatsmeowClient(txtid)
 					signalKill(txtid)
 				}
@@ -1078,6 +1082,7 @@ func (s *server) SendDocument() http.HandlerFunc {
 		Id            string
 		MimeType      string
 		ContextInfo   waE2E.ContextInfo
+		MentionAll    bool
 		QuotedMessage *waE2E.Message `json:"QuotedMessage,omitempty"`
 	}
 
@@ -1190,11 +1195,16 @@ func (s *server) SendDocument() http.HandlerFunc {
 				}
 			}
 		}
-		if t.ContextInfo.MentionedJID != nil {
+		mentions, err := resolveAllMentions(r.Context(), recipient, t.ContextInfo.MentionedJID, t.Caption, t.MentionAll, clientManager.GetWhatsmeowClient(txtid).GetGroupInfo)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if jids := mergeMentionJIDs(mentions, t.Caption); len(jids) > 0 {
 			if msg.DocumentMessage.ContextInfo == nil {
 				msg.DocumentMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.DocumentMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.DocumentMessage.ContextInfo.MentionedJID = jids
 		}
 
 		if t.ContextInfo.IsForwarded != nil && *t.ContextInfo.IsForwarded {
@@ -1212,7 +1222,7 @@ func (s *server) SendDocument() http.HandlerFunc {
 
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
-		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "document", t.Caption, "", historyLimit)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "document", t.Caption, "", historyLimit, msg)
 
 		// Publish sent message event to RabbitMQ
 		token := r.Context().Value("userinfo").(Values).Get("Token")
@@ -1371,6 +1381,7 @@ func (s *server) SendAudio() http.HandlerFunc {
 			}
 		}
 
+		// Audio captions are not included in the outgoing message.
 		if t.ContextInfo.MentionedJID != nil {
 			if msg.AudioMessage.ContextInfo == nil {
 				msg.AudioMessage.ContextInfo = &waE2E.ContextInfo{}
@@ -1393,7 +1404,7 @@ func (s *server) SendAudio() http.HandlerFunc {
 
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
-		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "audio", "", "", historyLimit)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "audio", "", "", historyLimit, msg)
 
 		token := r.Context().Value("userinfo").(Values).Get("Token")
 		userID := r.Context().Value("userinfo").(Values).Get("Id")
@@ -1441,6 +1452,7 @@ func (s *server) SendImage() http.HandlerFunc {
 		Id            string
 		MimeType      string
 		ContextInfo   waE2E.ContextInfo
+		MentionAll    bool
 		QuotedMessage *waE2E.Message `json:"QuotedMessage,omitempty"`
 	}
 
@@ -1556,11 +1568,16 @@ func (s *server) SendImage() http.HandlerFunc {
 			}
 		}
 
-		if t.ContextInfo.MentionedJID != nil {
+		mentions, err := resolveAllMentions(r.Context(), recipient, t.ContextInfo.MentionedJID, t.Caption, t.MentionAll, clientManager.GetWhatsmeowClient(txtid).GetGroupInfo)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if jids := mergeMentionJIDs(mentions, t.Caption); len(jids) > 0 {
 			if msg.ImageMessage.ContextInfo == nil {
 				msg.ImageMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.ImageMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.ImageMessage.ContextInfo.MentionedJID = jids
 		}
 
 		if t.ContextInfo.IsForwarded != nil && *t.ContextInfo.IsForwarded {
@@ -1578,7 +1595,7 @@ func (s *server) SendImage() http.HandlerFunc {
 
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
-		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "image", t.Caption, "", historyLimit)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "image", t.Caption, "", historyLimit, msg)
 
 		// Publish sent message event to RabbitMQ
 		token := r.Context().Value("userinfo").(Values).Get("Token")
@@ -1741,7 +1758,7 @@ func (s *server) SendSticker() http.HandlerFunc {
 
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
-		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "sticker", "", "", historyLimit)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "sticker", "", "", historyLimit, msg)
 
 		// Publish sent message event to RabbitMQ
 		token := r.Context().Value("userinfo").(Values).Get("Token")
@@ -1771,6 +1788,7 @@ func (s *server) SendVideo() http.HandlerFunc {
 		JPEGThumbnail []byte
 		MimeType      string
 		ContextInfo   waE2E.ContextInfo
+		MentionAll    bool
 		QuotedMessage *waE2E.Message `json:"QuotedMessage,omitempty"`
 	}
 
@@ -1879,11 +1897,16 @@ func (s *server) SendVideo() http.HandlerFunc {
 				}
 			}
 		}
-		if t.ContextInfo.MentionedJID != nil {
+		mentions, err := resolveAllMentions(r.Context(), recipient, t.ContextInfo.MentionedJID, t.Caption, t.MentionAll, clientManager.GetWhatsmeowClient(txtid).GetGroupInfo)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if jids := mergeMentionJIDs(mentions, t.Caption); len(jids) > 0 {
 			if msg.VideoMessage.ContextInfo == nil {
 				msg.VideoMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.VideoMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.VideoMessage.ContextInfo.MentionedJID = jids
 		}
 
 		if t.ContextInfo.IsForwarded != nil && *t.ContextInfo.IsForwarded {
@@ -1901,7 +1924,7 @@ func (s *server) SendVideo() http.HandlerFunc {
 
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
-		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "video", t.Caption, "", historyLimit)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "video", t.Caption, "", historyLimit, msg)
 
 		// Publish sent message event to RabbitMQ
 		token := r.Context().Value("userinfo").(Values).Get("Token")
@@ -2170,15 +2193,15 @@ func (s *server) SendLocation() http.HandlerFunc {
 func (s *server) SendButtons() http.HandlerFunc {
 
 	type buttonStruct struct {
-		Type        string `json:"type"`         // "reply" (default) | "cta_url" | "cta_call" | "copy"
-		Title       string `json:"title"`        // Texto do botão (max 20 caracteres)
-		Text        string `json:"text"`         // Fallback para Title
-		ButtonText  string `json:"buttonText"`   // Fallback para Title (legacy)
-		ID          string `json:"id"`           // ID do botão
-		ButtonId    string `json:"buttonId"`     // Fallback para ID
-		URL         string `json:"url"`          // Necessário para cta_url
-		PhoneNumber string `json:"phone_number"` // Necessário para cta_call
-		CopyCode    string `json:"copy_code"`    // Necessário para copy
+		Type        string `json:"type"`       // "reply" (default) | "cta_url" | "cta_call" | "copy"
+		Title       string `json:"title"`      // Button label (max 20 characters)
+		Text        string `json:"text"`       // Fallback for Title
+		ButtonText  string `json:"buttonText"` // Fallback for Title (legacy)
+		ID          string `json:"id"`
+		ButtonId    string `json:"buttonId"`     // Fallback for ID
+		URL         string `json:"url"`          // Required for cta_url
+		PhoneNumber string `json:"phone_number"` // Required for cta_call
+		CopyCode    string `json:"copy_code"`    // Required for copy
 	}
 
 	type sendButtonsStruct struct {
@@ -2209,7 +2232,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 			return
 		}
 
-		// --- Fallbacks e Validações Básicas ---
 		body := strings.TrimSpace(t.Body)
 		if body == "" {
 			body = strings.TrimSpace(t.Text)
@@ -2220,7 +2242,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 			return
 		}
 
-		// --- Parse de Botões para NativeFlow (Interactive) ---
+		// Convert buttons to the interactive native flow format.
 		nativeBtns := make([]*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton, 0, len(t.Buttons))
 
 		for _, btn := range t.Buttons {
@@ -2235,7 +2257,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 				continue
 			}
 
-			// WhatsApp limita o título a 20 caracteres nos botões
+			// WhatsApp limits button labels to 20 characters.
 			if runes := []rune(title); len(runes) > 20 {
 				title = string(runes[:20])
 			}
@@ -2270,7 +2292,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 				name = "cta_copy"
 				pm = map[string]string{"display_text": title, "copy_code": btn.CopyCode}
 			default:
-				continue // Tipo desconhecido, ignora o botão
+				continue
 			}
 
 			paramsJSON, _ := json.Marshal(pm)
@@ -2285,7 +2307,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 			return
 		}
 
-		// --- Destinatário e Mensagem ID ---
 		recipient, err := validateMessageFields(r.Context(), clientManager.GetWhatsmeowClient(txtid), t.Phone, t.ContextInfo.StanzaID, t.ContextInfo.Participant)
 		if err != nil {
 			s.Respond(w, r, http.StatusBadRequest, err)
@@ -2313,7 +2334,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 			}
 		}
 
-		// --- ContextInfo (Citações/Responder) ---
+		// Preserve reply context, mentions, and forwarding information.
 		var ctxInfo waE2E.ContextInfo
 		if t.ContextInfo.StanzaID != nil {
 			qm := t.QuotedMessage
@@ -2333,7 +2354,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 			ctxInfo.IsForwarded = t.ContextInfo.IsForwarded
 		}
 
-		// --- Construção da InteractiveMessage ---
 		interactiveMsg := &waE2E.InteractiveMessage{
 			Header:      &waE2E.InteractiveMessage_Header{},
 			Body:        &waE2E.InteractiveMessage_Body{Text: proto.String(body)},
@@ -2350,7 +2370,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 			interactiveMsg.Footer = &waE2E.InteractiveMessage_Footer{Text: proto.String(t.Footer)}
 		}
 
-		// Prioridade para Imagem no Header, senão usa Título (Texto)
+		// Prefer the header image over the text title.
 		if imgMsg != nil {
 			interactiveMsg.Header.HasMediaAttachment = proto.Bool(true)
 			interactiveMsg.Header.Media = &waE2E.InteractiveMessage_Header_ImageMessage{ImageMessage: imgMsg}
@@ -2360,7 +2380,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 
 		finalMsg := &waE2E.Message{InteractiveMessage: interactiveMsg}
 
-		// --- Nó BIZ (Fundamental para renderizar os botões) ---
+		// WhatsApp requires these business nodes to render interactive buttons.
 		extraNodes := []waBinary.Node{{
 			Tag: "biz",
 			Content: []waBinary.Node{{
@@ -2373,7 +2393,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 			}},
 		}}
 
-		// --- Envio Final ---
 		resp, err := sendMessageWithRecovery(txtid, client, context.Background(), recipient, finalMsg,
 			whatsmeow.SendRequestExtra{
 				ID:              msgid,
@@ -2386,7 +2405,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 			return
 		}
 
-		// --- Histórico e Eventos ---
 		historyStr := r.Context().Value("userinfo").(Values).Get("History")
 		historyLimit, _ := strconv.Atoi(historyStr)
 		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "buttons", body, "", historyLimit)
@@ -2394,7 +2412,6 @@ func (s *server) SendButtons() http.HandlerFunc {
 		token := r.Context().Value("userinfo").(Values).Get("Token")
 		s.publishSentMessageEvent(token, txtid, txtid, recipient, msgid, finalMsg, resp.Timestamp)
 
-		// --- Resposta HTTP ---
 		responseJSON, _ := json.Marshal(map[string]interface{}{
 			"Details":   "Sent",
 			"Timestamp": resp.Timestamp.Unix(),
@@ -2757,6 +2774,7 @@ func (s *server) SendMessage() http.HandlerFunc {
 		LinkPreview   bool
 		Id            string
 		ContextInfo   waE2E.ContextInfo
+		MentionAll    bool
 		QuotedText    string         `json:"QuotedText,omitempty"`
 		QuotedMessage *waE2E.Message `json:"QuotedMessage,omitempty"`
 	}
@@ -2854,11 +2872,16 @@ func (s *server) SendMessage() http.HandlerFunc {
 				QuotedMessage: qm,
 			}
 		}
-		if t.ContextInfo.MentionedJID != nil {
+		mentions, err := resolveAllMentions(r.Context(), recipient, t.ContextInfo.MentionedJID, t.Body, t.MentionAll, clientManager.GetWhatsmeowClient(txtid).GetGroupInfo)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if jids := mergeMentionJIDs(mentions, t.Body); len(jids) > 0 {
 			if msg.ExtendedTextMessage.ContextInfo == nil {
 				msg.ExtendedTextMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.ExtendedTextMessage.ContextInfo.MentionedJID = jids
 		}
 		if t.ContextInfo.IsForwarded != nil && *t.ContextInfo.IsForwarded {
 			if msg.ExtendedTextMessage.ContextInfo == nil {
@@ -3055,6 +3078,7 @@ func (s *server) SendEditMessage() http.HandlerFunc {
 		Body        string
 		Id          string
 		ContextInfo waE2E.ContextInfo
+		MentionAll  bool
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -3114,11 +3138,16 @@ func (s *server) SendEditMessage() http.HandlerFunc {
 				QuotedMessage: &waE2E.Message{Conversation: proto.String("")},
 			}
 		}
-		if t.ContextInfo.MentionedJID != nil {
+		mentions, err := resolveAllMentions(r.Context(), recipient, t.ContextInfo.MentionedJID, t.Body, t.MentionAll, clientManager.GetWhatsmeowClient(txtid).GetGroupInfo)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+		if jids := mergeMentionJIDs(mentions, t.Body); len(jids) > 0 {
 			if msg.ExtendedTextMessage.ContextInfo == nil {
 				msg.ExtendedTextMessage.ContextInfo = &waE2E.ContextInfo{}
 			}
-			msg.ExtendedTextMessage.ContextInfo.MentionedJID = t.ContextInfo.MentionedJID
+			msg.ExtendedTextMessage.ContextInfo.MentionedJID = jids
 		}
 
 		resp, err = sendMessageWithRecovery(txtid, clientManager.GetWhatsmeowClient(txtid), context.Background(), recipient, clientManager.GetWhatsmeowClient(txtid).BuildEdit(recipient, msgid, msg))
@@ -4579,6 +4608,14 @@ func (s *server) PinMessage() http.HandlerFunc {
 
 // Mark messages as read
 func (s *server) MarkRead() http.HandlerFunc {
+	return s.markReceipt(types.ReceiptTypeRead)
+}
+
+func (s *server) MarkPlayed() http.HandlerFunc {
+	return s.markReceipt(types.ReceiptTypePlayed)
+}
+
+func (s *server) markReceipt(receiptType types.ReceiptType) http.HandlerFunc {
 
 	type markReadStruct struct {
 		Id          []string
@@ -4639,13 +4676,17 @@ func (s *server) MarkRead() http.HandlerFunc {
 			return
 		}
 
-		err = clientManager.GetWhatsmeowClient(txtid).MarkRead(context.Background(), t.Id, time.Now(), jidChat, jidSender)
+		if receiptType == types.ReceiptTypePlayed && jidChat.Server == types.GroupServer && jidSender.IsEmpty() {
+			s.Respond(w, r, http.StatusBadRequest, errors.New("SenderPhone is required for group played receipts"))
+			return
+		}
+		err = clientManager.GetWhatsmeowClient(txtid).MarkRead(r.Context(), t.Id, time.Now(), jidChat, jidSender, receiptType)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New("failure marking messages as read"))
 			return
 		}
 
-		response := map[string]interface{}{"Details": "Message(s) marked as read"}
+		response := map[string]interface{}{"Details": "Message(s) marked as " + string(receiptType)}
 		responseJson, err := json.Marshal(response)
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, err)
@@ -6491,6 +6532,12 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 			return
 		}
 
+		if err := reserveSessionDeletion(id); err != nil {
+			s.respondWithJSON(w, http.StatusConflict, map[string]interface{}{"code": http.StatusConflict, "success": false, "error": err.Error()})
+			return
+		}
+		defer releaseSessionDeletion(id)
+
 		// Get user info before deletion
 		var uname, jid, token string
 		err = s.db.QueryRow("SELECT name, jid, token FROM users WHERE id = $1", id).Scan(&uname, &jid, &token)
@@ -6499,15 +6546,37 @@ func (s *server) DeleteUserComplete() http.HandlerFunc {
 			// Continue anyway since we have the ID
 		}
 
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+
 		// 1. Logout and disconnect instance
 		clientManager.stopSocketRecovery(id, false)
 		if client := clientManager.GetWhatsmeowClient(id); client != nil {
 			if client.IsConnected() {
 				log.Info().Str("id", id).Msg("Logging out user")
-				client.Logout(context.Background())
+				if err := client.Logout(cleanupCtx); err != nil {
+					log.Warn().Err(err).Str("user_id", id).Msg("Remote logout failed; deleting local credentials")
+				}
 			}
 			log.Info().Str("id", id).Msg("Disconnecting from WhatsApp")
 			client.Disconnect()
+		}
+
+		// Stop the session owner before deleting credentials. Keep the user row
+		// if cleanup cannot establish an exact device or the store is unavailable.
+		signalKill(id)
+		if err := waitForSessionStop(cleanupCtx, id); err != nil {
+			s.respondWithJSON(w, http.StatusConflict, map[string]interface{}{"code": http.StatusConflict, "success": false, "error": "session is still stopping; retry full deletion"})
+			return
+		}
+		if err := s.deleteSessionDevice(cleanupCtx, id); err != nil {
+			log.Error().Err(err).Str("user_id", id).Msg("Failed to delete persisted device")
+			status := http.StatusInternalServerError
+			if errors.Is(err, errAmbiguousSessionDevice) {
+				status = http.StatusConflict
+			}
+			s.respondWithJSON(w, status, map[string]interface{}{"code": status, "success": false, "error": "could not safely remove device credentials; user retained"})
+			return
 		}
 
 		// 2. Query S3 config before deleting the user
@@ -6623,14 +6692,26 @@ func resolveMessageRecipient(ctx context.Context, lidStore messageLIDStore, phon
 	}
 
 	if strings.ContainsRune(phone, '@') {
+		// ParseJID can silently ignore extra @ segments or accept an empty
+		// server. Reject malformed input without restricting existing JID types.
+		if strings.Count(phone, "@") != 1 || strings.IndexFunc(phone, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) >= 0 {
+			return types.EmptyJID, errors.New("invalid Phone: expected a complete WhatsApp JID")
+		}
 		recipient, ok := parseJID(phone)
-		if !ok {
+		if !ok || recipient.Server == "" {
 			return types.EmptyJID, errors.New("could not parse Phone")
 		}
 		return recipient, nil
 	}
 
 	bareID := strings.TrimPrefix(phone, "+")
+	// Bare identifiers are numeric phone numbers or cached LIDs. Do not turn
+	// usernames or Cloud API BSUIDs into phone-number JIDs.
+	if bareID == "" || strings.IndexFunc(bareID, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return types.EmptyJID, errors.New("invalid Phone: use digits with an optional leading +, or a complete WhatsApp JID; usernames and BSUIDs are not supported")
+	}
 	if lidStore == nil {
 		return types.NewJID(bareID, types.DefaultUserServer), nil
 	}
@@ -7297,9 +7378,18 @@ func (s *server) GetHistory() http.HandlerFunc {
 }
 
 // save outgoing message to history
-func (s *server) saveOutgoingMessageToHistory(userID, chatJID, messageID, messageType, textContent, mediaLink string, historyLimit int) {
+func (s *server) saveOutgoingMessageToHistory(userID, chatJID, messageID, messageType, textContent, mediaLink string, historyLimit int, message ...*waE2E.Message) {
 	if historyLimit > 0 {
-		err := s.saveMessageToHistory(userID, chatJID, "me", messageID, messageType, textContent, mediaLink, "", "")
+		// Keep media download metadata for the web client, using the same
+		// envelope as incoming history, without storing full plaintext media files.
+		dataJSON := ""
+		if len(message) > 0 && message[0] != nil {
+			encoded, err := json.Marshal(map[string]interface{}{"Info": map[string]interface{}{"IsFromMe": true}, "Message": message[0]})
+			if err == nil {
+				dataJSON = string(encoded)
+			}
+		}
+		err := s.saveMessageToHistory(userID, chatJID, "me", messageID, messageType, textContent, mediaLink, "", dataJSON)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to save outgoing message to history")
 		}
@@ -7405,7 +7495,7 @@ func (s *server) GetHmacConfig() http.HandlerFunc {
 func (s *server) DeleteHmacConfig() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		txtid := r.Context().Value("userinfo").(Values).Get("Id")
-		token := r.Context().Value("userinfo").(Values).Get("Token") // ← Pegar o token
+		token := r.Context().Value("userinfo").(Values).Get("Token")
 
 		// Clear HMAC key
 		_, err := s.db.Exec(`UPDATE users SET hmac_key = NULL WHERE id = $1`, txtid)
