@@ -109,7 +109,10 @@ func initializeSQLite(config DatabaseConfig) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("could not create dbdata directory: %w", err)
 	}
 
-	dbPath := filepath.ToSlash(filepath.Join(config.Path, "users.db"))
+	dbPath := filepath.ToSlash(filepath.Join(config.Path, "main.db"))
+	if err := migrateSQLiteUsers(dbPath, filepath.Join(config.Path, "users.db")); err != nil {
+		return nil, fmt.Errorf("failed to migrate users.db: %w", err)
+	}
 	db, err := sqlx.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
@@ -122,23 +125,31 @@ func initializeSQLite(config DatabaseConfig) (*sqlx.DB, error) {
 	return db, nil
 }
 
+// HistoryMessage is one message_history row. Timestamp is when the row was
+// stored; SentAt is the send time WhatsApp reported (nil when unknown, e.g.
+// rows stored before the column existed).
 type HistoryMessage struct {
-	ID              int       `json:"id" db:"id"`
-	UserID          string    `json:"user_id" db:"user_id"`
-	ChatJID         string    `json:"chat_jid" db:"chat_jid"`
-	SenderJID       string    `json:"sender_jid" db:"sender_jid"`
-	MessageID       string    `json:"message_id" db:"message_id"`
-	Timestamp       time.Time `json:"timestamp" db:"timestamp"`
-	MessageType     string    `json:"message_type" db:"message_type"`
-	TextContent     string    `json:"text_content" db:"text_content"`
-	MediaLink       string    `json:"media_link" db:"media_link"`
-	QuotedMessageID string    `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
-	DataJson        string    `json:"data_json" db:"datajson"`
+	ID              int        `json:"id" db:"id"`
+	UserID          string     `json:"user_id" db:"user_id"`
+	ChatJID         string     `json:"chat_jid" db:"chat_jid"`
+	SenderJID       string     `json:"sender_jid" db:"sender_jid"`
+	MessageID       string     `json:"message_id" db:"message_id"`
+	Timestamp       time.Time  `json:"timestamp" db:"timestamp"`
+	SentAt          *time.Time `json:"sent_at,omitempty" db:"sent_at"`
+	MessageType     string     `json:"message_type" db:"message_type"`
+	TextContent     string     `json:"text_content" db:"text_content"`
+	MediaLink       string     `json:"media_link" db:"media_link"`
+	QuotedMessageID string     `json:"quoted_message_id,omitempty" db:"quoted_message_id"`
+	DataJson        string     `json:"data_json" db:"datajson"`
 }
 
-func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, messageType, textContent, mediaLink, quotedMessageID, dataJson string) error {
+// saveMessageToHistory stores one message. sentAt is the send time WhatsApp
+// reported for it; pass the zero time when it is unknown and sent_at stays NULL.
+func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, messageType, textContent, mediaLink, quotedMessageID, dataJson string, sentAt time.Time) error {
 	// Serialize persistence with user deletion and read the current retention setting.
-	// PostgreSQL locks the user row; SQLite acquires its write lock before reading.
+	// PostgreSQL takes FOR KEY SHARE on the user row: it blocks the deletion but not other saves,
+	// so a large history sync doesn't queue every message of the user behind one lock.
+	// SQLite acquires its write lock before reading.
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return err
@@ -151,7 +162,7 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
 	}
 	queryLimit := "SELECT COALESCE(history, 0) FROM users WHERE id=?"
 	if s.db.DriverName() == "postgres" {
-		queryLimit += " FOR UPDATE"
+		queryLimit += " FOR KEY SHARE"
 	}
 	var limit int
 	if err = tx.Get(&limit, tx.Rebind(queryLimit), userID); err == sql.ErrNoRows {
@@ -162,6 +173,15 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
 	if limit <= 0 {
 		return nil
 	}
+	// Lock the chat before the upsert, even when this save will skip trimming.
+	// ON CONFLICT DO UPDATE locks existing rows even if its WHERE rejects the
+	// update. Taking that row lock before the chat lock can deadlock with a trim
+	// holding the chat lock and trying to delete the same old message.
+	if s.db.DriverName() == "postgres" {
+		if _, err = tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", userID+" "+chatJID); err != nil {
+			return fmt.Errorf("failed to lock chat for history save: %w", err)
+		}
+	}
 	// Idempotent insert: HistorySync batches (and reconnects) routinely redeliver
 	// messages already persisted via the live Message event. The (user_id, message_id)
 	// unique constraint makes those duplicates an expected condition, not an error,
@@ -171,8 +191,8 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
 	// Rebind adapts the ? placeholders to the active driver ($1.. on Postgres,
 	// ? on SQLite), so the query is defined once. The conditional upsert is valid
 	// on both Postgres and modern SQLite.
-	query := s.db.Rebind(`INSERT INTO message_history (user_id, chat_jid, sender_jid, message_id, timestamp, message_type, text_content, media_link, quoted_message_id, datajson)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	query := s.db.Rebind(`INSERT INTO message_history (user_id, chat_jid, sender_jid, message_id, timestamp, sent_at, message_type, text_content, media_link, quoted_message_id, datajson)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (user_id, message_id) DO UPDATE SET
                   message_type = excluded.message_type,
                   text_content = excluded.text_content,
@@ -181,14 +201,44 @@ func (s *server) saveMessageToHistory(userID, chatJID, senderJID, messageID, mes
               WHERE message_history.message_type = 'unknown'
                 AND excluded.message_type = 'edit'
                 AND message_history.chat_jid = excluded.chat_jid`)
-	_, err = tx.Exec(query, userID, chatJID, senderJID, messageID, time.Now(), messageType, textContent, mediaLink, quotedMessageID, dataJson)
+	var sentAtValue interface{}
+	if !sentAt.IsZero() {
+		// Use a canonical zone for both drivers. In particular, SQLite's time
+		// parser cannot round-trip every name used by time.FixedZone.
+		sentAtValue = sentAt.UTC()
+	}
+	_, err = tx.Exec(query, userID, chatJID, senderJID, messageID, time.Now(), sentAtValue, messageType, textContent, mediaLink, quotedMessageID, dataJson)
 	if err != nil {
 		return fmt.Errorf("failed to save message to history: %w", err)
 	}
-	if err = s.trimMessageHistory(tx, userID, chatJID, limit); err != nil {
-		return err
+	// Trimming walks the whole chat, even when nothing is over the limit, so on chats with
+	// many messages it can run on only every Nth save (WUZAPI_HISTORY_TRIM_INTERVAL).
+	if s.shouldTrimMessageHistory(userID, chatJID) {
+		if err = s.trimMessageHistory(tx, userID, chatJID, limit); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+func (s *server) shouldTrimMessageHistory(userID, chatJID string) bool {
+	if historyTrimInterval <= 1 {
+		return true
+	}
+	s.historySavesMu.Lock()
+	defer s.historySavesMu.Unlock()
+	if s.historySaves == nil {
+		s.historySaves = make(map[historyChatKey]uint64)
+	}
+	key := historyChatKey{userID: userID, chatJID: chatJID}
+	count := s.historySaves[key] + 1
+	if count >= historyTrimInterval {
+		// Completed intervals do not need to retain a counter in memory.
+		delete(s.historySaves, key)
+		return true
+	}
+	s.historySaves[key] = count
+	return false
 }
 
 func (s *server) trimMessageHistory(tx *sqlx.Tx, userID, chatJID string, limit int) error {
@@ -257,5 +307,15 @@ func (s *server) deleteUserAndHistory(userID string) error {
 	if _, err = tx.Exec(tx.Rebind("DELETE FROM message_history WHERE user_id=?"), userID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	s.historySavesMu.Lock()
+	for key := range s.historySaves {
+		if key.userID == userID {
+			delete(s.historySaves, key)
+		}
+	}
+	s.historySavesMu.Unlock()
+	return nil
 }

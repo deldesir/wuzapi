@@ -288,7 +288,7 @@ paths:
       tags:
         - Admin
       summary: Delete a user from DB and S3, logout and disconnect from whatsapp and clear it up from memory
-      description: Deletes a user by their ID, including login out, disconnect and memory cleanup Also removes all user files from S3.
+      description: Stops the session, attempts remote logout, deletes safely identified credentials, and removes the user, history, memory state and local/S3 files. Ambiguous ownership returns 409 and retains the user and devices. File cleanup is best effort.
       security:
         - AdminAuth: []
       parameters:
@@ -306,6 +306,48 @@ paths:
             application/json:
               schema:
                 example: {"code":200,"data":{"id":"4e4942c7dee1deef99ab8fd9f7350de5","jid":"","name":"mariano"},"details":"User instance removed completely","success":true}
+        409:
+          description: Ambiguous device ownership or session shutdown/deletion conflict. Only ambiguous_device_ownership enables dashboard recovery.
+          content:
+            application/json:
+              schema:
+                example: {"code":409,"success":false,"error_code":"ambiguous_device_ownership","error":"could not safely remove device credentials; user retained"}
+  /admin/users/{id}/preserve-devices:
+    delete:
+      tags:
+        - Admin
+      summary: Delete an instance while preserving all WhatsApp device credentials
+      description: |
+        Explicitly opts into preserving credentials. Stops the session without remote logout,
+        removes the user and history atomically, and cleans up memory and local/S3 files.
+        Never resolves, deletes or reassigns WhatsApp devices. Devices remain linked to the phone.
+        File cleanup is best effort. Orphaned credentials require separate cleanup.
+        A previous failed full deletion is not required. No request body is needed.
+        Stdio method admin.users.delete.preserve_devices accepts userId and adminToken.
+      security:
+        - AdminAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the instance to remove
+      responses:
+        200:
+          description: Instance removed; all device credentials preserved
+          content:
+            application/json:
+              schema:
+                example: {"code":200,"success":true,"data":{"id":"INSTANCE_ID","name":"example","jid":"","devices_preserved":true},"details":"user instance removed; WhatsApp credentials preserved and devices remain linked to the phone"}
+        401:
+          description: Invalid or missing admin token
+        404:
+          description: User not found
+        409:
+          description: Session is still stopping or a deletion is already in progress; user retained
+        500:
+          description: Database error
   /admin/proxy-pool:
     get:
       tags:
@@ -754,7 +796,7 @@ paths:
           content:
             application/json:
               schema:
-                example: { "code": 200, "data": { "Connected": true, "LoggedIn": true }, "success": true }
+                example: { "code": 200, "data": { "connected": true, "loggedIn": true }, "success": true }
   /session/pairphone:
     post:
       tags:
@@ -2169,8 +2211,14 @@ paths:
         message ID in quoted_message_id, and replacement text or caption in text_content
         (which can be empty). The original row is not modified. Consumers must apply edits
         to their targets, using protocolMessage.timestampMS in datajson for edit ordering
-        when available. Database timestamps represent insertion time, including for HistorySync.
+        when available. Database timestamps represent insertion time, including for HistorySync;
+        sent_at holds the send time WhatsApp reported, when known.
         A limited result may contain an edit without its original message.
+        Reactions, edits and deletes sent through the API are stored like received ones, with
+        sender_jid `me` and the send's own message_id. Reactions keep the target in quoted_message_id
+        (a removed reaction sent through the API has an empty text_content); deletes keep it in text_content.
+        Newsletter edits and deletes use a generated local history message_id because WhatsApp
+        reuses the target ID. Target fields and endpoint responses are unchanged.
         Live and HistorySync edits use the same fields. Legacy unknown rows are repaired
         when the same edit is redelivered; existing rows are not scanned or backfilled.
       security:
@@ -2221,6 +2269,7 @@ paths:
                       sender_jid: "5491155554444@s.whatsapp.net"
                       message_id: "3EB0C767D26A1B5F7C83"
                       timestamp: "2023-12-01T15:30:00Z"
+                      sent_at: "2023-12-01T15:29:58Z"
                       message_type: "text"
                       text_content: "Hello, how are you?"
                       media_link: ""
@@ -3539,8 +3588,13 @@ definitions:
       timestamp:
         type: string
         format: date-time
-        description: "Timestamp when the message was sent/received"
+        description: "When the row was stored. HistorySync messages are stored at sync time, so use sent_at for the send time"
         example: "2023-12-01T15:30:00Z"
+      sent_at:
+        type: string
+        format: date-time
+        description: "When the message was sent, as reported by WhatsApp. Omitted when unknown, including rows stored before this field existed"
+        example: "2023-12-01T15:29:58Z"
       message_type:
         type: string
         description: "Type of message (text, image, audio, video, document, sticker, contact, location, etc.)"
