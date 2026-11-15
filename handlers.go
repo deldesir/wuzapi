@@ -2190,6 +2190,21 @@ func (s *server) SendLocation() http.HandlerFunc {
 }
 
 // Sends Buttons
+func nativeButtonParams(name, params string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || !json.Valid([]byte(params)) {
+		return "", "", errors.New("native button requires a name and valid params_json")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(params), &object); err != nil || object == nil {
+		return "", "", errors.New("native button params_json must be a JSON object")
+	}
+	return name, params, nil
+}
+
+func voiceCallParams(title string) map[string]string {
+	return map[string]string{"display_text": title}
+}
 func (s *server) SendButtons() http.HandlerFunc {
 
 	type buttonStruct struct {
@@ -2202,9 +2217,12 @@ func (s *server) SendButtons() http.HandlerFunc {
 		URL         string `json:"url"`          // Required for cta_url
 		PhoneNumber string `json:"phone_number"` // Required for cta_call
 		CopyCode    string `json:"copy_code"`    // Required for copy
+		Name        string `json:"name"`
+		ParamsJSON  string `json:"params_json"`
 	}
 
 	type sendButtonsStruct struct {
+		Envelope string `json:"Envelope,omitempty"`
 		Phone         string            `json:"Phone"`
 		Body          string            `json:"Body"`
 		Text          string            `json:"text"`
@@ -2232,6 +2250,12 @@ func (s *server) SendButtons() http.HandlerFunc {
 			return
 		}
 
+		envelope, err := normalizeButtonEnvelope(t.Envelope)
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+
 		body := strings.TrimSpace(t.Body)
 		if body == "" {
 			body = strings.TrimSpace(t.Text)
@@ -2253,7 +2277,7 @@ func (s *server) SendButtons() http.HandlerFunc {
 			if title == "" {
 				title = strings.TrimSpace(btn.ButtonText)
 			}
-			if title == "" {
+			if title == "" && !strings.EqualFold(strings.TrimSpace(btn.Type), "native") {
 				continue
 			}
 
@@ -2278,6 +2302,16 @@ func (s *server) SendButtons() http.HandlerFunc {
 				btnType = "reply"
 			}
 
+			if btnType == "native" {
+				name, params, err := nativeButtonParams(btn.Name, btn.ParamsJSON)
+				if err != nil {
+					s.Respond(w, r, http.StatusBadRequest, err)
+					return
+				}
+				nativeBtns = append(nativeBtns, &waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{Name: proto.String(name), ButtonParamsJSON: proto.String(params)})
+				continue
+			}
+
 			switch btnType {
 			case "reply":
 				name = "quick_reply"
@@ -2288,6 +2322,9 @@ func (s *server) SendButtons() http.HandlerFunc {
 			case "cta_call":
 				name = "cta_call"
 				pm = map[string]string{"display_text": title, "phone_number": btn.PhoneNumber}
+			case "voice_call":
+				name = "voice_call"
+				pm = voiceCallParams(title)
 			case "copy":
 				name = "cta_copy"
 				pm = map[string]string{"display_text": title, "copy_code": btn.CopyCode}
@@ -2392,6 +2429,14 @@ func (s *server) SendButtons() http.HandlerFunc {
 				}},
 			}},
 		}}
+
+		if envelope != "original" {
+			finalMsg, extraNodes, err = buildButtonEnvelope(interactiveMsg, envelope, t.Title)
+			if err != nil {
+				s.Respond(w, r, http.StatusInternalServerError, err)
+				return
+			}
+		}
 
 		resp, err := sendMessageWithRecovery(txtid, client, context.Background(), recipient, finalMsg,
 			whatsmeow.SendRequestExtra{
@@ -2915,12 +2960,28 @@ func (s *server) SendMessage() http.HandlerFunc {
 	}
 }
 
+// pollSelectableCount returns how many options a poll's voters may pick:
+// 1 when not given (single answer), otherwise 0 (any number) up to the
+// number of options.
+func pollSelectableCount(count *int, options int) (int, error) {
+	if count == nil {
+		return 1, nil
+	}
+	if *count < 0 || *count > options {
+		return 0, fmt.Errorf("SelectableCount must be between 0 (any number) and the number of options (%d)", options)
+	}
+	return *count, nil
+}
+
 func (s *server) SendPoll() http.HandlerFunc {
 	type pollRequest struct {
 		Group   string   `json:"group"`   // The recipient's group id (120363313346913103@g.us)
 		Header  string   `json:"header"`  // The poll's headline text
 		Options []string `json:"options"` // The list of poll options
-		Id      string
+		// How many options each voter may pick: 1 (the default) for a single
+		// answer, 0 for any number, or up to the number of options
+		SelectableCount *int `json:"selectableCount"`
+		Id              string
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -2957,6 +3018,12 @@ func (s *server) SendPoll() http.HandlerFunc {
 			return
 		}
 
+		selectable, err := pollSelectableCount(req.SelectableCount, len(req.Options))
+		if err != nil {
+			s.Respond(w, r, http.StatusBadRequest, err)
+			return
+		}
+
 		if req.Id == "" {
 			msgid = clientManager.GetWhatsmeowClient(txtid).GenerateMessageID()
 		} else {
@@ -2969,7 +3036,7 @@ func (s *server) SendPoll() http.HandlerFunc {
 			return
 		}
 
-		pollMessage := clientManager.GetWhatsmeowClient(txtid).BuildPollCreation(req.Header, req.Options, 1)
+		pollMessage := clientManager.GetWhatsmeowClient(txtid).BuildPollCreation(req.Header, req.Options, selectable)
 		resp, err = sendMessageWithRecovery(txtid, clientManager.GetWhatsmeowClient(txtid), context.Background(), recipient, pollMessage, whatsmeow.SendRequestExtra{ID: msgid})
 		if err != nil {
 			s.Respond(w, r, http.StatusInternalServerError, errors.New(fmt.Sprintf("failed to send poll: %v", err)))
@@ -2979,6 +3046,11 @@ func (s *server) SendPoll() http.HandlerFunc {
 		// Remember the plaintext options so incoming vote webhooks can
 		// resolve the hashed selections back to readable strings.
 		clientManager.SetPollOptions(txtid, msgid, req.Options)
+
+		// Store the sent poll like every other send, so it shows in the chat history
+		historyStr := r.Context().Value("userinfo").(Values).Get("History")
+		historyLimit, _ := strconv.Atoi(historyStr)
+		s.saveOutgoingMessageToHistory(txtid, recipient.String(), msgid, "poll", req.Header, "", resp.Timestamp, historyLimit, pollMessage)
 
 		// Publish sent message event to RabbitMQ
 		token := r.Context().Value("userinfo").(Values).Get("Token")
@@ -7282,22 +7354,14 @@ func (s *server) GetHistory() http.HandlerFunc {
 			return
 		}
 
-		// If chat_jid is "index", return mapping of all instances to their chat_jids
+		// If chat_jid is "index", return only the authenticated user's chat_jids.
 		if chatJID == "index" {
-			var query string
-			if s.db.DriverName() == "postgres" {
-				query = `
-					SELECT user_id, chat_jid, MAX(timestamp) as last_message_time
-					FROM message_history 
-					GROUP BY user_id, chat_jid 
-					ORDER BY user_id, last_message_time DESC`
-			} else { // sqlite
-				query = `
-					SELECT user_id, chat_jid, MAX(timestamp) as last_message_time
-					FROM message_history 
-					GROUP BY user_id, chat_jid 
-					ORDER BY user_id, last_message_time DESC`
-			}
+			query := s.db.Rebind(`
+				SELECT user_id, chat_jid, MAX(timestamp) as last_message_time
+				FROM message_history
+				WHERE user_id = ?
+				GROUP BY user_id, chat_jid
+				ORDER BY user_id, last_message_time DESC`)
 
 			type ChatMapping struct {
 				UserID          string `json:"user_id" db:"user_id"`
@@ -7306,7 +7370,7 @@ func (s *server) GetHistory() http.HandlerFunc {
 			}
 
 			var mappings []ChatMapping
-			err := s.db.Select(&mappings, query)
+			err := s.db.Select(&mappings, query, txtid)
 			if err != nil {
 				s.Respond(w, r, http.StatusInternalServerError, fmt.Errorf("failed to get chat mappings: %w", err))
 				return
