@@ -2337,6 +2337,26 @@ group chats, and return the normal success envelope with `Details: Updated`.
 No local persistence or migration is added. Unknown fields and trailing JSON
 are rejected.
 
+## Delete a chat conversation
+
+`POST /chat/deletechat` (stdio `chat.deletechat`) deletes a whole conversation
+on every device of the account, like "Delete chat" in the phone app. It is an
+app state change; `/chat/delete` revokes a single message instead.
+
+```json
+{"Chat":"5491112345678@s.whatsapp.net","DeleteMedia":false,"LastMessageTimestamp":1700000000,"LastMessageId":"MESSAGE_ID","LastMessageFromMe":false}
+```
+
+Only `Chat` is required (phone/LID and group JIDs). WhatsApp clients use the
+last message to decide what the deletion covers, so send it when you know it:
+`LastMessageTimestamp` (Unix seconds), `LastMessageId` and `LastMessageFromMe`.
+`LastMessageSender` is required when that message was sent by someone else in a
+group, and rejected otherwise. Without them the range ends at the current time
+and has no message key. `DeleteMedia:true` also deletes the chat's media files
+from the devices. The messages stored in WuzAPI's message history are not
+deleted. Success returns `Details: Updated`; unknown fields and trailing JSON are
+rejected.
+
 ## WhatsApp labels
 
 Authenticated label operations update WhatsApp app state (account/client support
@@ -2461,3 +2481,14 @@ curl -X POST http://localhost:8080/chat/send/voice \
 This multipart endpoint is HTTP-only. Stdio clients continue to send prepared
 audio through `chat.send.audio`. Microphone capture in the web client requires
 HTTPS or localhost.
+
+### Legacy chat history index
+
+`GET /chat/history?chat_jid=index` returns only the authenticated user's
+conversation metadata. The `data` object is keyed by that user's ID and contains
+an array of `{ "chat_jid": "777@lid", "last_updated": "2026-11-11T12:00:00Z" }`
+entries, ordered by latest message time descending. It is `{}` when the user has
+no stored messages. History must be enabled. Other users' IDs, chats, and activity
+timestamps are never included.
+
+Stdio method: `chat.history`, with `token` and `chat_jid: "index"`.

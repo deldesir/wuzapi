@@ -38,12 +38,14 @@ const (
 )
 
 type server struct {
-	db             *sqlx.DB
-	router         *mux.Router
-	exPath         string
-	mode           ServerMode
-	historySavesMu sync.Mutex
-	historySaves   map[historyChatKey]uint64
+	messageSecretsOnce sync.Once
+	hasMessageSecrets  bool
+	db                 *sqlx.DB
+	router             *mux.Router
+	exPath             string
+	mode               ServerMode
+	historySavesMu     sync.Mutex
+	historySaves       map[historyChatKey]uint64
 }
 
 type historyChatKey struct {
@@ -99,7 +101,7 @@ var (
 
 var privateIPBlocks []*net.IPNet
 
-const version = "1.0.9"
+const version = "1.1.1"
 
 func parseAutomaticPresence(value string) (types.Presence, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
